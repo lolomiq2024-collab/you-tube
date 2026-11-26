@@ -54,7 +54,6 @@ public class MainActivity extends Activity {
     private static final String KEY_USER = "user_lists";
     private static final String KEY_REMOTE = "remote_json";
     private static final String KEY_LAST_ID = "last_id";
-    private static final String KEY_FULL = "full";
 
     private static final long REFRESH_INTERVAL_MS = 10 * 60 * 1000L;
 
@@ -70,7 +69,7 @@ public class MainActivity extends Activity {
     private final ArrayList<String[]> lists = new ArrayList<>();
     private int current = -1;
     private String currentId = null;
-    private boolean full = true;
+    private boolean playing = false;
     private long lastFetch = 0;
 
     private FrameLayout rootFrame;
@@ -88,7 +87,6 @@ public class MainActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         loadLists();
-        full = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_FULL, true);
         setupAdapter();
         setupWebView();
 
@@ -96,12 +94,7 @@ public class MainActivity extends Activity {
         rootFrame.setBackgroundColor(BG);
         setContentView(rootFrame);
         buildLayout();
-
-        if (!lists.isEmpty()) {
-            String last = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_LAST_ID, null);
-            int idx = indexOfId(last);
-            play(idx >= 0 ? idx : 0);
-        }
+        applySystemUi();
 
         fetchRemote();
     }
@@ -214,7 +207,6 @@ public class MainActivity extends Activity {
                     remote.addAll(parsed);
                     rebuild();
                     adapter.notifyDataSetChanged();
-                    if (currentId == null && !lists.isEmpty()) play(0);
                 });
             } catch (Exception ignored) {
             } finally {
@@ -302,7 +294,21 @@ public class MainActivity extends Activity {
         currentId = lists.get(index)[1];
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_LAST_ID, currentId).apply();
         adapter.notifyDataSetChanged();
+        playing = true;
+        buildLayout();
+        applySystemUi();
         web.loadDataWithBaseURL(ORIGIN, playerHtml(currentId), "text/html", "utf-8", null);
+    }
+
+    // العودة إلى الصفحة الرئيسية وإيقاف التشغيل
+    private void goHome() {
+        playing = false;
+        currentId = null;
+        current = -1;
+        web.loadUrl("about:blank");
+        buildLayout();
+        applySystemUi();
+        adapter.notifyDataSetChanged();
     }
 
     // ---------- الواجهة ----------
@@ -344,13 +350,11 @@ public class MainActivity extends Activity {
     }
 
     private void buildLayout() {
-        boolean land = getResources().getConfiguration().orientation == Configuration.ORIENTATION_LANDSCAPE;
-
         if (web.getParent() != null) ((ViewGroup) web.getParent()).removeView(web);
         if (content != null) rootFrame.removeView(content);
 
         content = new LinearLayout(this);
-        content.setOrientation(land ? LinearLayout.HORIZONTAL : LinearLayout.VERTICAL);
+        content.setOrientation(LinearLayout.VERTICAL);
         content.setBackgroundColor(BG);
         content.setLayoutDirection(View.LAYOUT_DIRECTION_RTL);
 
@@ -360,12 +364,12 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         TextView toggle = new TextView(this);
-        toggle.setText(full ? "☰" : "⛶");
+        toggle.setText("☰");
         toggle.setTextColor(Color.WHITE);
         toggle.setTextSize(22);
         toggle.setGravity(Gravity.CENTER);
         toggle.setBackgroundColor(0x66000000);
-        toggle.setOnClickListener(v -> setFull(!full));
+        toggle.setOnClickListener(v -> goHome());
         playerHolder.addView(toggle, new FrameLayout.LayoutParams(
                 dp(44), dp(44), Gravity.LEFT | Gravity.CENTER_VERTICAL));
 
@@ -394,16 +398,12 @@ public class MainActivity extends Activity {
         side.addView(listView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        if (full) {
+        if (playing) {
             content.addView(playerHolder, new LinearLayout.LayoutParams(
                     ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-        } else if (land) {
-            content.addView(playerHolder, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 3f));
-            content.addView(side, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 2f));
         } else {
-            int h = getResources().getDisplayMetrics().widthPixels * 9 / 16;
-            content.addView(playerHolder, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, h));
-            content.addView(side, new LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+            content.addView(side, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         }
 
         rootFrame.addView(content, 0, new FrameLayout.LayoutParams(
@@ -411,16 +411,9 @@ public class MainActivity extends Activity {
         if (customView != null) content.setVisibility(View.GONE);
     }
 
-    private void setFull(boolean value) {
-        full = value;
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_FULL, value).apply();
-        buildLayout();
-        applySystemUi();
-    }
-
     private void applySystemUi() {
         if (customView != null) return;
-        getWindow().getDecorView().setSystemUiVisibility(full
+        getWindow().getDecorView().setSystemUiVisibility(playing
                 ? (View.SYSTEM_UI_FLAG_FULLSCREEN
                 | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
                 | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
@@ -498,11 +491,6 @@ public class MainActivity extends Activity {
                     if (wasCurrent) {
                         currentId = null;
                         current = -1;
-                        if (!lists.isEmpty()) {
-                            play(0);
-                        } else {
-                            web.loadUrl("about:blank");
-                        }
                     }
                     adapter.notifyDataSetChanged();
                 })
@@ -522,8 +510,8 @@ public class MainActivity extends Activity {
     public void onBackPressed() {
         if (customView != null) {
             web.getWebChromeClient().onHideCustomView();
-        } else if (full) {
-            setFull(false);
+        } else if (playing) {
+            goHome();
         } else {
             super.onBackPressed();
         }
