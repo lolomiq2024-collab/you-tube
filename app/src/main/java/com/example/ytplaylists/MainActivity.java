@@ -28,27 +28,50 @@ import android.widget.Toast;
 import org.json.JSONArray;
 import org.json.JSONObject;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
+import java.net.HttpURLConnection;
+import java.net.URL;
 import java.util.ArrayList;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 
 public class MainActivity extends Activity {
 
-    private static final String PREFS = "yt_playlists";
-    private static final String KEY_LISTS = "lists";
-    private static final String KEY_LAST = "last";
+    // رابط ملف القوائم على GitHub: عدّل الملف هناك فتتحدث القوائم تلقائياً دون إعادة بناء التطبيق
+    private static final String CONFIG_URL =
+            "https://raw.githubusercontent.com/lolomiq2024-collab/yt-playlists/main/playlists.json";
+
+    // قوائم احتياطية تُستخدم فقط قبل أول تحميل ناجح للملف
+    private static final String[][] DEFAULTS = {
+            {"مايا النحلة", "PL6qk-0ihmmB4O53zIbVntvbJIy_qgtbJk"}
+    };
 
     // هوية التضمين: معرّف حزمة التطبيق (يطلبها يوتيوب لتجنّب الخطأ 152/153)
     private static final String ORIGIN = "https://com.example.ytplaylists";
+
+    private static final String PREFS = "yt_playlists";
+    private static final String KEY_USER = "user_lists";
+    private static final String KEY_REMOTE = "remote_json";
+    private static final String KEY_LAST_ID = "last_id";
+    private static final String KEY_FULL = "full";
+
+    private static final long REFRESH_INTERVAL_MS = 10 * 60 * 1000L;
 
     private static final int BG = 0xFF121212;
     private static final int ACCENT = 0xFFF5B301;
 
     private static final Pattern LIST_PARAM = Pattern.compile("[?&]list=([A-Za-z0-9_-]+)");
     private static final Pattern LIST_ID = Pattern.compile("^(PL|UU|OL|FL|LL)[A-Za-z0-9_-]{10,}$");
+    private static final Pattern VALID_ID = Pattern.compile("^[A-Za-z0-9_-]{10,}$");
 
+    private final ArrayList<String[]> remote = new ArrayList<>();
+    private final ArrayList<String[]> user = new ArrayList<>();
     private final ArrayList<String[]> lists = new ArrayList<>();
     private int current = -1;
+    private String currentId = null;
+    private boolean full = true;
+    private long lastFetch = 0;
 
     private FrameLayout rootFrame;
     private LinearLayout content;
@@ -65,6 +88,7 @@ public class MainActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
 
         loadLists();
+        full = getSharedPreferences(PREFS, MODE_PRIVATE).getBoolean(KEY_FULL, true);
         setupAdapter();
         setupWebView();
 
@@ -74,45 +98,129 @@ public class MainActivity extends Activity {
         buildLayout();
 
         if (!lists.isEmpty()) {
-            int last = getSharedPreferences(PREFS, MODE_PRIVATE).getInt(KEY_LAST, 0);
-            if (last < 0 || last >= lists.size()) last = 0;
-            play(last);
+            String last = getSharedPreferences(PREFS, MODE_PRIVATE).getString(KEY_LAST_ID, null);
+            int idx = indexOfId(last);
+            play(idx >= 0 ? idx : 0);
         }
+
+        fetchRemote();
     }
 
     // ---------- بيانات القوائم ----------
 
     private void loadLists() {
-        lists.clear();
         SharedPreferences sp = getSharedPreferences(PREFS, MODE_PRIVATE);
-        String raw = sp.getString(KEY_LISTS, null);
-        if (raw == null) {
-            lists.add(new String[]{"مايا النحلة", "PL6qk-0ihmmB4O53zIbVntvbJIy_qgtbJk"});
-            saveLists();
-            return;
+
+        remote.clear();
+        String cached = sp.getString(KEY_REMOTE, null);
+        if (cached == null || !parseRemote(cached, remote)) {
+            remote.clear();
+            for (String[] d : DEFAULTS) remote.add(d);
         }
-        try {
-            JSONArray arr = new JSONArray(raw);
-            for (int i = 0; i < arr.length(); i++) {
-                JSONObject o = arr.getJSONObject(i);
-                lists.add(new String[]{o.getString("name"), o.getString("id")});
+
+        user.clear();
+        String raw = sp.getString(KEY_USER, null);
+        if (raw != null) {
+            try {
+                JSONArray arr = new JSONArray(raw);
+                for (int i = 0; i < arr.length(); i++) {
+                    JSONObject o = arr.getJSONObject(i);
+                    user.add(new String[]{o.getString("name"), o.getString("id")});
+                }
+            } catch (Exception ignored) {
             }
-        } catch (Exception ignored) {
         }
+        rebuild();
     }
 
-    private void saveLists() {
+    private void saveUser() {
         try {
             JSONArray arr = new JSONArray();
-            for (String[] l : lists) {
+            for (String[] l : user) {
                 JSONObject o = new JSONObject();
                 o.put("name", l[0]);
                 o.put("id", l[1]);
                 arr.put(o);
             }
-            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_LISTS, arr.toString()).apply();
+            getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_USER, arr.toString()).apply();
         } catch (Exception ignored) {
         }
+    }
+
+    private void rebuild() {
+        lists.clear();
+        lists.addAll(remote);
+        lists.addAll(user);
+        current = indexOfId(currentId);
+    }
+
+    private int indexOfId(String id) {
+        if (id == null) return -1;
+        for (int i = 0; i < lists.size(); i++) {
+            if (lists.get(i)[1].equals(id)) return i;
+        }
+        return -1;
+    }
+
+    private static boolean parseRemote(String raw, ArrayList<String[]> out) {
+        try {
+            String text = raw.trim();
+            if (text.startsWith("﻿")) text = text.substring(1);
+            JSONObject root = new JSONObject(text);
+            JSONArray arr = root.getJSONArray("playlists");
+            ArrayList<String[]> tmp = new ArrayList<>();
+            for (int i = 0; i < arr.length(); i++) {
+                JSONObject o = arr.getJSONObject(i);
+                String name = o.getString("name").trim();
+                String id = o.getString("id").trim();
+                if (!name.isEmpty() && VALID_ID.matcher(id).matches()) {
+                    tmp.add(new String[]{name, id});
+                }
+            }
+            if (tmp.isEmpty()) return false;
+            out.clear();
+            out.addAll(tmp);
+            return true;
+        } catch (Exception e) {
+            return false;
+        }
+    }
+
+    // تحميل ملف القوائم من الإنترنت وتحديث القائمة دون مقاطعة التشغيل الحالي
+    private void fetchRemote() {
+        lastFetch = System.currentTimeMillis();
+        new Thread(() -> {
+            HttpURLConnection c = null;
+            try {
+                c = (HttpURLConnection) new URL(CONFIG_URL + "?t=" + System.currentTimeMillis()).openConnection();
+                c.setConnectTimeout(8000);
+                c.setReadTimeout(8000);
+                c.setUseCaches(false);
+                if (c.getResponseCode() != 200) return;
+                InputStream in = c.getInputStream();
+                ByteArrayOutputStream bos = new ByteArrayOutputStream();
+                byte[] buf = new byte[4096];
+                int n;
+                while ((n = in.read(buf)) > 0) bos.write(buf, 0, n);
+                String raw = bos.toString("UTF-8");
+
+                ArrayList<String[]> parsed = new ArrayList<>();
+                if (!parseRemote(raw, parsed)) return;
+
+                getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_REMOTE, raw).apply();
+
+                runOnUiThread(() -> {
+                    remote.clear();
+                    remote.addAll(parsed);
+                    rebuild();
+                    adapter.notifyDataSetChanged();
+                    if (currentId == null && !lists.isEmpty()) play(0);
+                });
+            } catch (Exception ignored) {
+            } finally {
+                if (c != null) c.disconnect();
+            }
+        }).start();
     }
 
     // ---------- المشغّل ----------
@@ -159,7 +267,7 @@ public class MainActivity extends Activity {
                 rootFrame.removeView(customView);
                 customView = null;
                 content.setVisibility(View.VISIBLE);
-                getWindow().getDecorView().setSystemUiVisibility(View.SYSTEM_UI_FLAG_VISIBLE);
+                applySystemUi();
                 if (customCallback != null) {
                     customCallback.onCustomViewHidden();
                     customCallback = null;
@@ -191,10 +299,10 @@ public class MainActivity extends Activity {
     private void play(int index) {
         if (index < 0 || index >= lists.size()) return;
         current = index;
-        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_LAST, index).apply();
+        currentId = lists.get(index)[1];
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_LAST_ID, currentId).apply();
         adapter.notifyDataSetChanged();
-        web.loadDataWithBaseURL(ORIGIN, playerHtml(lists.get(index)[1]),
-                "text/html", "utf-8", null);
+        web.loadDataWithBaseURL(ORIGIN, playerHtml(currentId), "text/html", "utf-8", null);
     }
 
     // ---------- الواجهة ----------
@@ -251,6 +359,16 @@ public class MainActivity extends Activity {
         playerHolder.addView(web, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
+        TextView toggle = new TextView(this);
+        toggle.setText(full ? "☰" : "⛶");
+        toggle.setTextColor(Color.WHITE);
+        toggle.setTextSize(22);
+        toggle.setGravity(Gravity.CENTER);
+        toggle.setBackgroundColor(0x66000000);
+        toggle.setOnClickListener(v -> setFull(!full));
+        playerHolder.addView(toggle, new FrameLayout.LayoutParams(
+                dp(44), dp(44), Gravity.LEFT | Gravity.CENTER_VERTICAL));
+
         LinearLayout side = new LinearLayout(this);
         side.setOrientation(LinearLayout.VERTICAL);
 
@@ -270,13 +388,16 @@ public class MainActivity extends Activity {
         listView.setDividerHeight(1);
         listView.setOnItemClickListener((p, v, pos, id) -> play(pos));
         listView.setOnItemLongClickListener((p, v, pos, id) -> {
-            confirmDelete(pos);
+            if (pos >= remote.size()) confirmDelete(pos);
             return true;
         });
         side.addView(listView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
 
-        if (land) {
+        if (full) {
+            content.addView(playerHolder, new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+        } else if (land) {
             content.addView(playerHolder, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 3f));
             content.addView(side, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 2f));
         } else {
@@ -288,6 +409,29 @@ public class MainActivity extends Activity {
         rootFrame.addView(content, 0, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
         if (customView != null) content.setVisibility(View.GONE);
+    }
+
+    private void setFull(boolean value) {
+        full = value;
+        getSharedPreferences(PREFS, MODE_PRIVATE).edit().putBoolean(KEY_FULL, value).apply();
+        buildLayout();
+        applySystemUi();
+    }
+
+    private void applySystemUi() {
+        if (customView != null) return;
+        getWindow().getDecorView().setSystemUiVisibility(full
+                ? (View.SYSTEM_UI_FLAG_FULLSCREEN
+                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                | View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE)
+                : View.SYSTEM_UI_FLAG_VISIBLE);
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        if (hasFocus) applySystemUi();
     }
 
     private void showAddDialog() {
@@ -322,8 +466,9 @@ public class MainActivity extends Activity {
                     }
                     String name = nameInput.getText().toString().trim();
                     if (name.isEmpty()) name = "قائمة " + (lists.size() + 1);
-                    lists.add(new String[]{name, id});
-                    saveLists();
+                    user.add(new String[]{name, id});
+                    saveUser();
+                    rebuild();
                     adapter.notifyDataSetChanged();
                     play(lists.size() - 1);
                 })
@@ -344,18 +489,20 @@ public class MainActivity extends Activity {
                 .setTitle(lists.get(pos)[0])
                 .setMessage("حذف هذه القائمة؟")
                 .setPositiveButton("حذف", (d, w) -> {
+                    int userIndex = pos - remote.size();
+                    if (userIndex < 0 || userIndex >= user.size()) return;
                     boolean wasCurrent = pos == current;
-                    lists.remove(pos);
-                    saveLists();
+                    user.remove(userIndex);
+                    saveUser();
+                    rebuild();
                     if (wasCurrent) {
+                        currentId = null;
                         current = -1;
                         if (!lists.isEmpty()) {
                             play(0);
                         } else {
                             web.loadUrl("about:blank");
                         }
-                    } else if (pos < current) {
-                        current--;
                     }
                     adapter.notifyDataSetChanged();
                 })
@@ -375,6 +522,8 @@ public class MainActivity extends Activity {
     public void onBackPressed() {
         if (customView != null) {
             web.getWebChromeClient().onHideCustomView();
+        } else if (full) {
+            setFull(false);
         } else {
             super.onBackPressed();
         }
@@ -390,6 +539,7 @@ public class MainActivity extends Activity {
     protected void onResume() {
         super.onResume();
         web.onResume();
+        if (System.currentTimeMillis() - lastFetch > REFRESH_INTERVAL_MS) fetchRemote();
     }
 
     @Override
