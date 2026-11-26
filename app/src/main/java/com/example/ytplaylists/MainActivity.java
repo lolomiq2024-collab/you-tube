@@ -3,6 +3,7 @@ package com.example.ytplaylists;
 import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.SharedPreferences;
+import android.content.pm.ActivityInfo;
 import android.content.res.Configuration;
 import android.graphics.Color;
 import android.graphics.drawable.ColorDrawable;
@@ -42,9 +43,10 @@ public class MainActivity extends Activity {
     private static final String CONFIG_URL =
             "https://raw.githubusercontent.com/lolomiq2024-collab/yt-playlists/main/playlists.json";
 
-    // قوائم احتياطية تُستخدم فقط قبل أول تحميل ناجح للملف
+    // عناصر احتياطية تُستخدم فقط قبل أول تحميل ناجح للملف: {الاسم, المعرّف, النوع}
+    // النوع: p = قائمة تشغيل ، v = فيديو مفرد
     private static final String[][] DEFAULTS = {
-            {"مايا النحلة", "PL6qk-0ihmmB4O53zIbVntvbJIy_qgtbJk"}
+            {"مايا النحلة", "PL6qk-0ihmmB4O53zIbVntvbJIy_qgtbJk", "p"}
     };
 
     // هوية التضمين: معرّف حزمة التطبيق (يطلبها يوتيوب لتجنّب الخطأ 152/153)
@@ -61,7 +63,10 @@ public class MainActivity extends Activity {
     private static final int ACCENT = 0xFFF5B301;
 
     private static final Pattern LIST_PARAM = Pattern.compile("[?&]list=([A-Za-z0-9_-]+)");
+    private static final Pattern VIDEO_URL =
+            Pattern.compile("(?:[?&]v=|youtu\\.be/|/shorts/|/live/|/embed/)([A-Za-z0-9_-]{11})");
     private static final Pattern LIST_ID = Pattern.compile("^(PL|UU|OL|FL|LL)[A-Za-z0-9_-]{10,}$");
+    private static final Pattern VIDEO_ID = Pattern.compile("^[A-Za-z0-9_-]{11}$");
     private static final Pattern VALID_ID = Pattern.compile("^[A-Za-z0-9_-]{10,}$");
 
     private final ArrayList<String[]> remote = new ArrayList<>();
@@ -118,7 +123,7 @@ public class MainActivity extends Activity {
                 JSONArray arr = new JSONArray(raw);
                 for (int i = 0; i < arr.length(); i++) {
                     JSONObject o = arr.getJSONObject(i);
-                    user.add(new String[]{o.getString("name"), o.getString("id")});
+                    user.add(new String[]{o.getString("name"), o.getString("id"), o.optString("type", "p")});
                 }
             } catch (Exception ignored) {
             }
@@ -133,6 +138,7 @@ public class MainActivity extends Activity {
                 JSONObject o = new JSONObject();
                 o.put("name", l[0]);
                 o.put("id", l[1]);
+                o.put("type", l[2]);
                 arr.put(o);
             }
             getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_USER, arr.toString()).apply();
@@ -155,6 +161,20 @@ public class MainActivity extends Activity {
         return -1;
     }
 
+    // يستخرج {المعرّف, النوع} من رابط يوتيوب (قائمة أو فيديو) أو من معرّف مجرّد
+    private static String[] extractTarget(String input) {
+        if (input == null) return null;
+        input = input.trim();
+        if (input.isEmpty()) return null;
+        Matcher m = LIST_PARAM.matcher(input);
+        if (m.find()) return new String[]{m.group(1), "p"};
+        m = VIDEO_URL.matcher(input);
+        if (m.find()) return new String[]{m.group(1), "v"};
+        if (LIST_ID.matcher(input).matches()) return new String[]{input, "p"};
+        if (VIDEO_ID.matcher(input).matches()) return new String[]{input, "v"};
+        return null;
+    }
+
     private static boolean parseRemote(String raw, ArrayList<String[]> out) {
         try {
             String text = raw.trim();
@@ -165,9 +185,18 @@ public class MainActivity extends Activity {
             for (int i = 0; i < arr.length(); i++) {
                 JSONObject o = arr.getJSONObject(i);
                 String name = o.getString("name").trim();
-                String id = o.getString("id").trim();
-                if (!name.isEmpty() && VALID_ID.matcher(id).matches()) {
-                    tmp.add(new String[]{name, id});
+                String[] t = null;
+                if (o.has("url")) {
+                    t = extractTarget(o.getString("url"));
+                } else if (o.has("video")) {
+                    String v = o.getString("video").trim();
+                    if (VIDEO_ID.matcher(v).matches()) t = new String[]{v, "v"};
+                } else if (o.has("id")) {
+                    String id = o.getString("id").trim();
+                    if (VALID_ID.matcher(id).matches()) t = new String[]{id, "p"};
+                }
+                if (!name.isEmpty() && t != null) {
+                    tmp.add(new String[]{name, t[0], t[1]});
                 }
             }
             if (tmp.isEmpty()) return false;
@@ -268,21 +297,35 @@ public class MainActivity extends Activity {
         });
     }
 
-    private static String playerHtml(String listId) {
+    // type: p = قائمة تشغيل ، v = فيديو مفرد (يعاد تشغيله تلقائياً عند انتهائه)
+    private static String playerHtml(String id, String type) {
+        boolean video = "v".equals(type);
+        String src = video ? "videoId:'" + id + "'," : "";
+        String vars = video
+                ? "loop:1,playlist:'" + id + "',"
+                : "listType:'playlist',list:'" + id + "',loop:1,";
         return "<!DOCTYPE html><html><head>"
                 + "<meta name=\"viewport\" content=\"width=device-width,initial-scale=1\">"
-                + "<style>html,body{margin:0;height:100%;background:#000;overflow:hidden}"
+                + "<style>html,body{margin:0;height:100%;background:#000;overflow:hidden;position:relative}"
                 + "#p{width:100%;height:100%}</style></head><body><div id=\"p\"></div>"
                 + "<script src=\"https://www.youtube.com/iframe_api\"></script>"
                 + "<script>"
                 + "var player,errs=0;"
+                // تكبير إطار المشغّل ليملأ الشاشة كاملة (تغطية) بدل بقاء الصورة في الوسط
+                + "function fit(){var f=document.querySelector('iframe');if(!f)return;"
+                + "var W=window.innerWidth,H=window.innerHeight,w=Math.max(W,H*16/9),h=w*9/16;"
+                + "f.style.position='absolute';f.style.width=w+'px';f.style.height=h+'px';"
+                + "f.style.left=((W-w)/2)+'px';f.style.top=((H-h)/2)+'px';}"
+                + "window.addEventListener('resize',fit);"
                 + "function onYouTubeIframeAPIReady(){"
-                + "player=new YT.Player('p',{width:'100%',height:'100%',"
-                + "playerVars:{listType:'playlist',list:'" + listId + "',autoplay:1,loop:1,"
-                + "playsinline:1,rel:0,enablejsapi:1,origin:'" + ORIGIN + "',widget_referrer:'" + ORIGIN + "'},"
+                + "player=new YT.Player('p',{width:'100%',height:'100%'," + src
+                + "playerVars:{" + vars + "autoplay:1,playsinline:1,rel:0,enablejsapi:1,"
+                + "origin:'" + ORIGIN + "',widget_referrer:'" + ORIGIN + "'},"
                 + "events:{"
-                + "onReady:function(e){e.target.playVideo();},"
-                + "onStateChange:function(e){if(e.data===1){errs=0;}},"
+                + "onReady:function(e){fit();e.target.playVideo();setTimeout(fit,500);},"
+                + "onStateChange:function(e){fit();if(e.data===1){errs=0;}"
+                + (video ? "if(e.data===0){try{player.seekTo(0);player.playVideo();}catch(x){}}" : "")
+                + "},"
                 + "onError:function(e){errs++;if(errs<60){try{player.nextVideo();}catch(x){}}}"
                 + "}});}"
                 + "</script></body></html>";
@@ -290,14 +333,17 @@ public class MainActivity extends Activity {
 
     private void play(int index) {
         if (index < 0 || index >= lists.size()) return;
+        String[] item = lists.get(index);
         current = index;
-        currentId = lists.get(index)[1];
+        currentId = item[1];
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putString(KEY_LAST_ID, currentId).apply();
         adapter.notifyDataSetChanged();
         playing = true;
+        // التشغيل بوضع أفقي ليملأ الفيديو الشاشة
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_SENSOR_LANDSCAPE);
         buildLayout();
         applySystemUi();
-        web.loadDataWithBaseURL(ORIGIN, playerHtml(currentId), "text/html", "utf-8", null);
+        web.loadDataWithBaseURL(ORIGIN, playerHtml(item[1], item[2]), "text/html", "utf-8", null);
     }
 
     // العودة إلى الصفحة الرئيسية وإيقاف التشغيل
@@ -306,6 +352,7 @@ public class MainActivity extends Activity {
         currentId = null;
         current = -1;
         web.loadUrl("about:blank");
+        setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
         buildLayout();
         applySystemUi();
         adapter.notifyDataSetChanged();
@@ -377,7 +424,7 @@ public class MainActivity extends Activity {
         side.setOrientation(LinearLayout.VERTICAL);
 
         Button add = new Button(this);
-        add.setText("+ إضافة قائمة تشغيل");
+        add.setText("+ إضافة رابط");
         add.setTextColor(Color.BLACK);
         add.setBackgroundColor(ACCENT);
         add.setOnClickListener(v -> showAddDialog());
@@ -439,7 +486,7 @@ public class MainActivity extends Activity {
         nameInput.setSingleLine(true);
 
         TextView linkLabel = new TextView(this);
-        linkLabel.setText("رابط القائمة");
+        linkLabel.setText("رابط القائمة أو الفيديو");
         EditText linkInput = new EditText(this);
         linkInput.setSingleLine(true);
 
@@ -449,17 +496,19 @@ public class MainActivity extends Activity {
         box.addView(linkInput);
 
         new AlertDialog.Builder(this)
-                .setTitle("إضافة قائمة تشغيل")
+                .setTitle("إضافة رابط")
                 .setView(box)
                 .setPositiveButton("إضافة", (d, w) -> {
-                    String id = extractListId(linkInput.getText().toString().trim());
-                    if (id == null) {
+                    String[] t = extractTarget(linkInput.getText().toString());
+                    if (t == null) {
                         Toast.makeText(this, "الرابط غير صحيح", Toast.LENGTH_SHORT).show();
                         return;
                     }
                     String name = nameInput.getText().toString().trim();
-                    if (name.isEmpty()) name = "قائمة " + (lists.size() + 1);
-                    user.add(new String[]{name, id});
+                    if (name.isEmpty()) {
+                        name = ("v".equals(t[1]) ? "فيديو " : "قائمة ") + (lists.size() + 1);
+                    }
+                    user.add(new String[]{name, t[0], t[1]});
                     saveUser();
                     rebuild();
                     adapter.notifyDataSetChanged();
@@ -469,18 +518,10 @@ public class MainActivity extends Activity {
                 .show();
     }
 
-    private static String extractListId(String input) {
-        if (input.isEmpty()) return null;
-        Matcher m = LIST_PARAM.matcher(input);
-        if (m.find()) return m.group(1);
-        if (LIST_ID.matcher(input).matches()) return input;
-        return null;
-    }
-
     private void confirmDelete(int pos) {
         new AlertDialog.Builder(this)
                 .setTitle(lists.get(pos)[0])
-                .setMessage("حذف هذه القائمة؟")
+                .setMessage("حذف هذا العنصر؟")
                 .setPositiveButton("حذف", (d, w) -> {
                     int userIndex = pos - remote.size();
                     if (userIndex < 0 || userIndex >= user.size()) return;
