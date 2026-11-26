@@ -38,6 +38,9 @@ public class MainActivity extends Activity {
     private static final String KEY_LISTS = "lists";
     private static final String KEY_LAST = "last";
 
+    // هوية التضمين: معرّف حزمة التطبيق (يطلبها يوتيوب لتجنّب الخطأ 152/153)
+    private static final String ORIGIN = "https://com.example.ytplaylists";
+
     private static final int BG = 0xFF121212;
     private static final int ACCENT = 0xFFF5B301;
 
@@ -176,7 +179,7 @@ public class MainActivity extends Activity {
                 + "function onYouTubeIframeAPIReady(){"
                 + "player=new YT.Player('p',{width:'100%',height:'100%',"
                 + "playerVars:{listType:'playlist',list:'" + listId + "',autoplay:1,loop:1,"
-                + "playsinline:1,rel:0,enablejsapi:1,origin:'https://www.youtube.com'},"
+                + "playsinline:1,rel:0,enablejsapi:1,origin:'" + ORIGIN + "',widget_referrer:'" + ORIGIN + "'},"
                 + "events:{"
                 + "onReady:function(e){e.target.playVideo();},"
                 + "onStateChange:function(e){if(e.data===1){errs=0;}},"
@@ -190,7 +193,7 @@ public class MainActivity extends Activity {
         current = index;
         getSharedPreferences(PREFS, MODE_PRIVATE).edit().putInt(KEY_LAST, index).apply();
         adapter.notifyDataSetChanged();
-        web.loadDataWithBaseURL("https://www.youtube.com", playerHtml(lists.get(index)[1]),
+        web.loadDataWithBaseURL(ORIGIN, playerHtml(lists.get(index)[1]),
                 "text/html", "utf-8", null);
     }
 
